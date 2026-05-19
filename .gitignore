@@ -1,0 +1,31 @@
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local environments and secrets
+.env
+.venv/
+venv/
+.claude/
+*/.claude/
+
+# Large/local data artifacts
+*.xlsx
+*.xls
+*.zip
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.log
+*.pdf
+
+# Generated outputs
+diamond_engine/models/
+diamond_engine/data/processed/
+
+# Keep placeholder directories trackable if added later
+!diamond_engine/data/raw/.gitkeep
+!diamond_engine/db/.gitkeep
