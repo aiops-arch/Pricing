@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from pandas.io.formats.style import Styler
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
@@ -94,7 +95,7 @@ def _color_inv_remark(val: str) -> str:
     return ""
 
 
-def _style_base_report(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def _style_base_report(df: pd.DataFrame) -> Styler:
     """Apply conditional formatting to the base report DataFrame for display."""
     def row_style(row):
         styles = [""] * len(row)
@@ -115,7 +116,7 @@ def _style_base_report(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     return df.style.apply(row_style, axis=1)
 
 
-def _style_pricing_results(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def _style_pricing_results(df: pd.DataFrame) -> Styler:
     """Apply colour coding to the pricing results table."""
     action_colors = {
         "INCREASE_DISC": "#ffe0b3",   # orange
