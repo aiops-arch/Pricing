@@ -172,119 +172,120 @@ def _build_price_history_features(conn: sqlite3.Connection) -> dict:
 
 def _build_market_context(conn: sqlite3.Connection) -> dict:
     """
-    Aggregate position_stones per (criteria_key, report_date) by joining
-    position data to the pricing_snapshots size-bucket ranges.
+    Aggregate position_stones per (criteria_key, report_date).
+
+    Join key: position_stones.psize == pricing_snapshots.from_size  (exact match)
+    Psize in the position report IS the size-group code from the backup CSV.
+
+    When multiple criteria_keys share the same from_size (e.g. 1.00-1.04 and
+    1.00-1.20 both start at 1.00), each criteria_key gets the SAME stone count —
+    all stones with Psize=1.00 belonging to that color/clarity/fluor combo.
 
     Returns a dict: (criteria_key, report_date) → aggregated feature dict
     """
     logger.info("Aggregating market context from position_stones…")
 
-    # Load size bucket boundaries from pricing_snapshots (distinct ranges per criteria)
-    buckets = conn.execute("""
-        SELECT DISTINCT criteria_key, color, clarity, fluor, from_size, to_size
-        FROM pricing_snapshots
-    """).fetchall()
+    # criteria_key lookup: (color, clarity, fluor, from_size) → [criteria_key, ...]
+    from collections import defaultdict
 
-    if not buckets:
+    bucket_keys: dict[tuple, list] = defaultdict(list)
+    for row in conn.execute("""
+        SELECT DISTINCT criteria_key, color, clarity, fluor, from_size
+        FROM pricing_snapshots
+    """):
+        criteria_key, color, clarity, fluor, from_size = row
+        bucket_keys[(color, clarity, fluor, from_size)].append(criteria_key)
+
+    if not bucket_keys:
         logger.warning("No pricing_snapshots data found — market context will be empty")
         return {}
 
-    # Load all position stones into memory, grouped by (date, color, clarity, fluor)
-    # Then map each stone to the matching size bucket
     stones = conn.execute("""
         SELECT report_date, color, clarity, fluor, psize,
                aging_days, stone_status,
                rapnet_disc, base_pd_disc, limit_1,
                rapnet_pos_world, rapnet_pos_ind, rapnet_pos_usa,
-               comp_world_1st, comp_india_1st, comp_usa_1st
+               comp_world_01, comp_india_01, comp_usa_01
         FROM position_stones
-        WHERE color IS NOT NULL AND clarity IS NOT NULL AND fluor IS NOT NULL
+        WHERE color IS NOT NULL AND clarity IS NOT NULL
+          AND fluor IS NOT NULL AND psize IS NOT NULL
     """).fetchall()
 
     if not stones:
         logger.warning("No position_stones data found — market context will be empty")
         return {}
 
-    # Build bucket lookup: (color, clarity, fluor) → list of (from_size, to_size, criteria_key)
-    from collections import defaultdict
+    def new_bucket():
+        return {
+            "stone_count": 0,
+            "aging_sum": 0.0,
+            "rapnet_disc_sum": 0.0,
+            "base_pd_sum": 0.0,
+            "limit_1_sum": 0.0,
+            "rapnet_disc_n": 0,
+            "base_pd_n": 0,
+            "limit_1_n": 0,
+            "rapnet_pos_world_min": None,
+            "rapnet_pos_ind_min": None,
+            "rapnet_pos_usa_min": None,
+            "comp_world_1st_sum": 0.0,
+            "comp_world_1st_n": 0,
+            "comp_india_1st_sum": 0.0,
+            "comp_india_1st_n": 0,
+            "comp_usa_1st_sum": 0.0,
+            "comp_usa_1st_n": 0,
+            "stones_in_stock": 0,
+            "stones_on_memo": 0,
+        }
 
-    bucket_map: dict[tuple, list] = defaultdict(list)
-    for criteria_key, color, clarity, fluor, from_size, to_size in buckets:
-        bucket_map[(color, clarity, fluor)].append((from_size, to_size, criteria_key))
-
-    def find_criteria_key(color, clarity, fluor, psize):
-        candidates = bucket_map.get((color, clarity, fluor), [])
-        for from_s, to_s, ck in candidates:
-            if from_s <= psize <= to_s + 0.005:
-                return ck
-        return None
-
-    # Aggregate
-    context_raw: dict[tuple, dict] = defaultdict(lambda: {
-        "stone_count": 0,
-        "aging_sum": 0.0,
-        "rapnet_disc_sum": 0.0,
-        "base_pd_sum": 0.0,
-        "limit_1_sum": 0.0,
-        "rapnet_disc_n": 0,
-        "base_pd_n": 0,
-        "limit_1_n": 0,
-        "rapnet_pos_world_min": None,
-        "rapnet_pos_ind_min": None,
-        "rapnet_pos_usa_min": None,
-        "comp_world_1st_sum": 0.0,
-        "comp_world_1st_n": 0,
-        "comp_india_1st_sum": 0.0,
-        "comp_india_1st_n": 0,
-        "comp_usa_1st_sum": 0.0,
-        "comp_usa_1st_n": 0,
-        "stones_in_stock": 0,
-        "stones_on_memo": 0,
-    })
+    context_raw: dict[tuple, dict] = defaultdict(new_bucket)
 
     for (report_date, color, clarity, fluor, psize,
          aging, status, rapnet_disc, base_pd, limit_1,
          pos_world, pos_ind, pos_usa,
          cw1, ci1, cu1) in stones:
 
-        ck = find_criteria_key(color, clarity, fluor, psize)
-        if ck is None:
+        # Exact Psize = from_size join — one stone may map to multiple
+        # criteria_keys when overlapping buckets share the same from_size
+        matched_keys = bucket_keys.get((color, clarity, fluor, psize), [])
+        if not matched_keys:
             continue
 
-        key = (ck, report_date)
-        d = context_raw[key]
-        d["stone_count"] += 1
-        if aging is not None:
-            d["aging_sum"] += aging
-        if rapnet_disc is not None:
-            d["rapnet_disc_sum"] += rapnet_disc
-            d["rapnet_disc_n"] += 1
-        if base_pd is not None:
-            d["base_pd_sum"] += base_pd
-            d["base_pd_n"] += 1
-        if limit_1 is not None:
-            d["limit_1_sum"] += limit_1
-            d["limit_1_n"] += 1
-        if pos_world is not None:
-            d["rapnet_pos_world_min"] = min(d["rapnet_pos_world_min"] or pos_world, pos_world)
-        if pos_ind is not None:
-            d["rapnet_pos_ind_min"] = min(d["rapnet_pos_ind_min"] or pos_ind, pos_ind)
-        if pos_usa is not None:
-            d["rapnet_pos_usa_min"] = min(d["rapnet_pos_usa_min"] or pos_usa, pos_usa)
-        if cw1 is not None:
-            d["comp_world_1st_sum"] += cw1
-            d["comp_world_1st_n"] += 1
-        if ci1 is not None:
-            d["comp_india_1st_sum"] += ci1
-            d["comp_india_1st_n"] += 1
-        if cu1 is not None:
-            d["comp_usa_1st_sum"] += cu1
-            d["comp_usa_1st_n"] += 1
-        status_lc = (status or "").lower()
-        if "memo" in status_lc:
-            d["stones_on_memo"] += 1
-        else:
-            d["stones_in_stock"] += 1
+        for ck in matched_keys:
+            key = (ck, report_date)
+            d = context_raw[key]
+            d["stone_count"] += 1
+            if aging is not None:
+                d["aging_sum"] += aging
+            if rapnet_disc is not None:
+                d["rapnet_disc_sum"] += rapnet_disc
+                d["rapnet_disc_n"] += 1
+            if base_pd is not None:
+                d["base_pd_sum"] += base_pd
+                d["base_pd_n"] += 1
+            if limit_1 is not None:
+                d["limit_1_sum"] += limit_1
+                d["limit_1_n"] += 1
+            if pos_world is not None:
+                d["rapnet_pos_world_min"] = min(d["rapnet_pos_world_min"] or pos_world, pos_world)
+            if pos_ind is not None:
+                d["rapnet_pos_ind_min"] = min(d["rapnet_pos_ind_min"] or pos_ind, pos_ind)
+            if pos_usa is not None:
+                d["rapnet_pos_usa_min"] = min(d["rapnet_pos_usa_min"] or pos_usa, pos_usa)
+            if cw1 is not None:
+                d["comp_world_1st_sum"] += cw1
+                d["comp_world_1st_n"] += 1
+            if ci1 is not None:
+                d["comp_india_1st_sum"] += ci1
+                d["comp_india_1st_n"] += 1
+            if cu1 is not None:
+                d["comp_usa_1st_sum"] += cu1
+                d["comp_usa_1st_n"] += 1
+            status_lc = (status or "").lower()
+            if "memo" in status_lc:
+                d["stones_on_memo"] += 1
+            else:
+                d["stones_in_stock"] += 1
 
     def safe_avg(total, n):
         return total / n if n > 0 else None
